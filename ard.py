@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, request
 import smbus
 import time
+import re
 
 app = Flask(__name__)
 
@@ -21,19 +22,26 @@ def read_sensor_data():
         raw_data = bus.read_i2c_block_data(arduino_address, 0, 32)
         message = ''.join([chr(b) for b in raw_data if b != 255 and b != 0])
         
-        # Parse sensor data (assuming format like "temp:23.5,hum:65,light:512")
-        sensor_data = {}
-        parts = message.split(',')
-        for part in parts:
-            if ':' in part:
-                key, value = part.split(':')
-                sensor_data[key.strip()] = value.strip()
+        # Improved parsing with error handling
+        sensor_data = {'temp': 0, 'hum': 0, 'light': 0}
+        
+        # Extract values using regular expressions
+        temp_match = re.search(r'temp[:=](\d+\.?\d*)', message, re.IGNORECASE)
+        hum_match = re.search(r'hum[:=](\d+\.?\d*)', message, re.IGNORECASE)
+        light_match = re.search(r'light[:=](\d+)', message, re.IGNORECASE)
+        
+        if temp_match:
+            sensor_data['temp'] = float(temp_match.group(1))
+        if hum_match:
+            sensor_data['hum'] = float(hum_match.group(1))
+        if light_match:
+            sensor_data['light'] = int(light_match.group(1))
         
         print("Received sensor data:", sensor_data)
         return sensor_data
     except Exception as e:
         print("Error reading sensor data:", e)
-        return {"error": str(e)}
+        return {"error": str(e), "raw_data": message}
 
 def send_command(command):
     try:
@@ -67,37 +75,45 @@ def get_relay_status():
 
 @app.route('/relay-control', methods=['POST'])
 def control_relay():
-    data = request.json
-    relay_num = data.get('relay')
-    state = data.get('state')
-    
-    if not relay_num or state not in ['on', 'off']:
-        return jsonify({"error": "Invalid parameters"}), 400
-    
-    command = f"R{relay_num}{state.upper()}"
-    success = send_command(command)
-    
-    if success:
-        return jsonify({"status": "success", "relay": relay_num, "state": state})
-    else:
-        return jsonify({"error": "Failed to send command"}), 500
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+            
+        relay_num = data.get('relay')
+        state = data.get('state')
+        
+        if not relay_num or state not in ['on', 'off']:
+            return jsonify({"error": "Invalid parameters"}), 400
+        
+        command = f"R{relay_num}{state.upper()}"
+        success = send_command(command)
+        
+        if success:
+            return jsonify({"status": "success", "relay": relay_num, "state": state})
+        else:
+            return jsonify({"error": "Failed to send command"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/relay', methods=['GET'])
 def direct_relay_control():
-    # Alternative endpoint for simpler GET requests
-    relay_num = request.args.get('num')
-    state = request.args.get('state')
-    
-    if not relay_num or state not in ['on', 'off']:
-        return jsonify({"error": "Invalid parameters"}), 400
-    
-    command = f"R{relay_num}{state.upper()}"
-    success = send_command(command)
-    
-    if success:
-        return jsonify({"status": "success", "relay": relay_num, "state": state})
-    else:
-        return jsonify({"error": "Failed to send command"}), 500
+    try:
+        relay_num = request.args.get('num')
+        state = request.args.get('state')
+        
+        if not relay_num or state not in ['on', 'off']:
+            return jsonify({"error": "Invalid parameters"}), 400
+        
+        command = f"R{relay_num}{state.upper()}"
+        success = send_command(command)
+        
+        if success:
+            return jsonify({"status": "success", "relay": relay_num, "state": state})
+        else:
+            return jsonify({"error": "Failed to send command"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000, debug=True)
