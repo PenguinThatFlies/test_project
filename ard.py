@@ -1,15 +1,16 @@
 from flask import Flask, jsonify, request
 import smbus
 import time
-import re
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 # I2C setup
 bus = smbus.SMBus(1)  # Raspberry Pi 4/5 – I2C-1
-arduino_address = 0x08  # Same address as Wire.begin(0x08) in Arduino
+arduino_address = 0x08  # Same as in Arduino's Wire.begin(0x08)
 
-# Store relay states (assuming 4 relays)
+# Store relay states (matches Arduino's relayStates array)
 relay_states = {
     'relay1': False,
     'relay2': False,
@@ -19,99 +20,108 @@ relay_states = {
 
 def read_sensor_data():
     try:
+        # Read 32 bytes from Arduino
         raw_data = bus.read_i2c_block_data(arduino_address, 0, 32)
-        message = ''.join([chr(b) for b in raw_data if b != 255 and b != 0])
         
-        # Improved parsing with error handling
-        sensor_data = {'temp': 0, 'hum': 0, 'light': 0}
+        # Convert to string and clean up
+        message = ''.join([chr(b) for b in raw_data if b != 0 and b != 255])
+        message = message.split('\x00')[0]  # Remove any null bytes
         
-        # Extract values using regular expressions
-        temp_match = re.search(r'temp[:=](\d+\.?\d*)', message, re.IGNORECASE)
-        hum_match = re.search(r'hum[:=](\d+\.?\d*)', message, re.IGNORECASE)
-        light_match = re.search(r'light[:=](\d+)', message, re.IGNORECASE)
-        
-        if temp_match:
-            sensor_data['temp'] = float(temp_match.group(1))
-        if hum_match:
-            sensor_data['hum'] = float(hum_match.group(1))
-        if light_match:
-            sensor_data['light'] = int(light_match.group(1))
-        
-        print("Received sensor data:", sensor_data)
-        return sensor_data
+        # Parse the comma-separated values (temp,humidity,light,distance)
+        parts = message.split(',')
+        if len(parts) >= 4:
+            sensor_data = {
+                'temperature': float(parts[0]),
+                'humidity': int(float(parts[1])),
+                'light': int(parts[2]),
+                'distance': float(parts[3])
+            }
+            print("Received sensor data:", sensor_data)
+            return sensor_data
+        else:
+            print("Incomplete data received:", message)
+            return {"error": "Incomplete data", "raw": message}
+            
     except Exception as e:
         print("Error reading sensor data:", e)
-        return {"error": str(e), "raw_data": message}
+        return {"error": str(e), "raw": message if 'message' in locals() else None}
 
 def send_command(command):
     try:
-        # Send maximum 32 bytes
+        # Convert command to bytes and send
         data = [ord(c) for c in command]
         bus.write_i2c_block_data(arduino_address, 0, data)
         
-        # Update relay states based on command
+        # Update relay states based on command (R1ON, R2OFF, etc.)
         cmd = command.upper()
-        if cmd.endswith('ON'):
-            relay_num = cmd[1]  # Assuming format like "R1ON"
-            relay_states[f'relay{relay_num}'] = True
-        elif cmd.endswith('OFF'):
-            relay_num = cmd[1]  # Assuming format like "R1OFF"
-            relay_states[f'relay{relay_num}'] = False
-            
+        if len(cmd) >= 3 and cmd[0] == 'R':
+            relay_num = int(cmd[1])  # R1ON → 1
+            if 1 <= relay_num <= 4:
+                if cmd.endswith('ON'):
+                    relay_states[f'relay{relay_num}'] = True
+                elif cmd.endswith('OFF'):
+                    relay_states[f'relay{relay_num}'] = False
+        
         print("Sent command:", command)
         return True
     except Exception as e:
         print("Error sending command:", e)
         return False
 
-@app.route('/data', methods=['GET'])
+@app.route('/api/data', methods=['GET'])
 def get_sensor_data():
     data = read_sensor_data()
     return jsonify(data)
 
-@app.route('/relay-status', methods=['GET'])
+@app.route('/api/relay-status', methods=['GET'])
 def get_relay_status():
     return jsonify(relay_states)
 
-@app.route('/relay-control', methods=['POST'])
+@app.route('/api/relay-control', methods=['POST'])
 def control_relay():
     try:
         data = request.get_json()
-        if not data:
-            return jsonify({"error": "No data provided"}), 400
-            
         relay_num = data.get('relay')
         state = data.get('state')
         
-        if not relay_num or state not in ['on', 'off']:
+        # Validate input
+        if relay_num not in ['1', '2', '3', '4'] or state not in ['on', 'off']:
             return jsonify({"error": "Invalid parameters"}), 400
         
         command = f"R{relay_num}{state.upper()}"
-        success = send_command(command)
-        
-        if success:
-            return jsonify({"status": "success", "relay": relay_num, "state": state})
+        if send_command(command):
+            return jsonify({
+                "status": "success",
+                "relay": relay_num,
+                "state": state,
+                "message": f"Relay {relay_num} turned {state}"
+            })
         else:
             return jsonify({"error": "Failed to send command"}), 500
+            
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/relay', methods=['GET'])
+@app.route('/api/relay', methods=['GET'])
 def direct_relay_control():
     try:
         relay_num = request.args.get('num')
         state = request.args.get('state')
         
-        if not relay_num or state not in ['on', 'off']:
+        # Validate input
+        if relay_num not in ['1', '2', '3', '4'] or state not in ['on', 'off']:
             return jsonify({"error": "Invalid parameters"}), 400
         
         command = f"R{relay_num}{state.upper()}"
-        success = send_command(command)
-        
-        if success:
-            return jsonify({"status": "success", "relay": relay_num, "state": state})
+        if send_command(command):
+            return jsonify({
+                "status": "success",
+                "relay": relay_num,
+                "state": state
+            })
         else:
             return jsonify({"error": "Failed to send command"}), 500
+            
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
